@@ -71,7 +71,7 @@ def clean_and_validate(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
     # 1. Validate 'RESULT' column
     invalid_result_mask = ~df_copy['RESULT'].isin(VALID_RESULT_VALUES)
-    df_copy.loc[invalid_result_mask, 'error_reason'] += 'Invalid RESULT value; '
+    df_copy.loc[invalid_result_mask, 'error_reason'] += 'Invalid RESULT value; (must be INS for Insert, DEL for Deletion, UPD for Updating)'
 
     # 2. Validate essential columns for missing values
     for col in ESSENTIAL_COLUMNS:
