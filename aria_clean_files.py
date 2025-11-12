@@ -6,8 +6,10 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 from typing import Tuple, List, Optional
 import os
+import unicodedata  # <-- Add this import at the top of your file
 
-# --- Configuration ---
+
+
 # Define essential columns that cannot be empty
 ESSENTIAL_COLUMNS = [
     'PERSON_ID', 'FIRST_NAME', 'SURNAME', 'EMAIL', 'COMPANY',
@@ -57,6 +59,22 @@ def load_data(filepath: str) -> Optional[pd.DataFrame]:
     df = df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
     return df
 
+def convert_accented_text(text: str) -> str:
+    """
+    Converts accented characters to their ASCII equivalents using built-ins.
+    e.g., 'René' -> 'Rene'
+    """
+
+    if not isinstance(text, str):
+        return text
+    
+    # 1. Normalize using NFKD to separate base characters from diacritics
+    normalized = unicodedata.normalize('NFKD', text)
+    # 2. Encode to ASCII, 'ignore' drops the non-ASCII diacritics
+    ascii_bytes = normalized.encode('ascii', 'ignore')
+    # 3. Decode back to a standard string
+    return ascii_bytes.decode('utf-8')
+
 def clean_and_validate(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Cleans, validates, and formats the DataFrame.
@@ -82,9 +100,11 @@ def clean_and_validate(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     # 3. Validate and format entitlement columns
     for col in ['DUTY_ENTITLEMENT', 'PALS_ENTITLEMENT', 'FIP_ENTITLEMENT']:
         if col in df_copy.columns:
-            df_copy[col] = df_copy[col].str.upper()
+            # Only apply .str.upper() to non-NaN values
+            df_copy[col] = df_copy[col].apply(lambda x: x.upper() if isinstance(x, str) else x)
             invalid_entitlement_mask = ~df_copy[col].isin(VALID_ENTITLEMENT_VALUES) & df_copy[col].notna()
             df_copy.loc[invalid_entitlement_mask, 'error_reason'] += f'Invalid {col} (must be Y/N); '
+
 
     # 4. Validate 'BLUE_VOUCHERS' is numeric
     # Convert 'N' or 'n' to '0' before numeric conversion
@@ -96,10 +116,7 @@ def clean_and_validate(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     df_copy['BLUE_VOUCHERS'] = numeric_vouchers
 
     # --- 5. NEW: Validate Dates ---
-    # This applies only to 'UPD' rows. INS/DEL rows have fill-in logic,
-    # so missing dates are not an error for them.
     upd_mask = df_copy['RESULT'] == 'UPD'
-    # Find UPD rows where BOTH dates are invalid (NaT)
     invalid_dates_mask = upd_mask & df_copy['JOINING_DATE'].isna() & df_copy['LEAVING_DATE'].isna()
     df_copy.loc[invalid_dates_mask, 'error_reason'] += 'UPD row must have at least one valid date; '
 
@@ -108,21 +125,28 @@ def clean_and_validate(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
     dropped_df = df_copy[dropped_mask]
     cleaned_df = df_copy[~dropped_mask].drop(columns=['error_reason'])
 
-    if cleaned_df.empty and not dropped_df.empty:
-        # All rows were dropped, return the empty cleaned_df and the dropped_df
-        return cleaned_df, dropped_df
-    elif cleaned_df.empty:
-        # No rows to process at all
+    if cleaned_df.empty:
+        # Return early if no rows are clean
         return cleaned_df, dropped_df
 
     # --- Apply Formatting to Cleaned Data ---
-    for col, func in STRING_FORMATTING_RULES.items():
+    for col, formatting_func in STRING_FORMATTING_RULES.items():
         if col in cleaned_df.columns:
-            cleaned_df[col] = cleaned_df[col].astype(str).apply(func)
+            
+            # --- NEW ROBUST FORMATTING ---
+            # This lambda function checks if the cell is a string.
+            # If it is: normalize it, then apply the formatting function.
+            # If it's not (e.g., it's NaN, None, or a number), leave it alone.
+            def format_and_normalize(cell_value):
+                if isinstance(cell_value, str):
+                    normalized_val = convert_accented_text(cell_value)
+                    return formatting_func(normalized_val)
+                return cell_value
+
+            cleaned_df[col] = cleaned_df[col].apply(format_and_normalize)
 
     # --- Handle Dates ---
     today = pd.to_datetime('today').normalize()
-    # Dates are already parsed, so we just apply the logic
 
     # Adjust dates based on 'RESULT'
     ins_mask = cleaned_df['RESULT'] == 'INS'
@@ -130,23 +154,17 @@ def clean_and_validate(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
 
     # If RESULT is INS, adjust JOINING_DATE
     cleaned_df.loc[ins_mask, 'JOINING_DATE'] = cleaned_df.loc[ins_mask, 'JOINING_DATE'].fillna(today)
-    # Set LEAVING_DATE to NaT (datetime null)
     cleaned_df.loc[ins_mask, 'LEAVING_DATE'] = pd.NaT
 
     # If RESULT is DEL, adjust LEAVING_DATE
     cleaned_df.loc[del_mask, 'LEAVING_DATE'] = cleaned_df.loc[del_mask, 'LEAVING_DATE'].fillna(today)
-    # Set JOINING_DATE to NaT (datetime null)
     cleaned_df.loc[del_mask, 'JOINING_DATE'] = pd.NaT
     
-    # --- NEW: Convert both columns to string AT THE END ---
-    # This applies to all rows (INS, DEL, UPD) at once.
-    # .dt.strftime() will correctly handle the NaT values by converting them to the string 'NaT'.
+    # Convert both columns to string AT THE END
     cleaned_df['JOINING_DATE'] = cleaned_df['JOINING_DATE'].dt.strftime('%Y.%m.%d %H:%M:%S')
     cleaned_df['LEAVING_DATE'] = cleaned_df['LEAVING_DATE'].dt.strftime('%Y.%m.%d %H:%M:%S')
 
-
     # --- Final Touches ---
-    # Add DATESTAMP column with today's date in the specific format
     datestamp = pd.Timestamp.now().strftime('%Y.%m.%d %H:%M:%S')
     cleaned_df['DATESTAMP'] = datestamp
 
